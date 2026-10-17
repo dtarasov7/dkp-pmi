@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${EXPECTED_MARKER:?Укажите ожидаемый несекретный тестовый маркер в EXPECTED_MARKER}"
+if [ -z "${EXPECTED_MARKER:-}" ]; then
+  echo "ОШИБКА: Укажите ожидаемый несекретный тестовый маркер в EXPECTED_MARKER"
+  exit 1
+fi
 echo "Читаем только искусственный маркер, не рабочие секреты."
 VALUE=$(kubectl -n pmi-5 exec reader -c app -- cat /mnt/external/marker)
 echo "Маркер из CSI-тома: $VALUE"

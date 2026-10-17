@@ -23,8 +23,34 @@ spec:
       type: RuntimeDefault
   containers:
   - name: app
-    image: busybox:1.36.1
-    command: ["sh", "-c", "mkdir -p /tmp/www; echo pmi-ok > /tmp/www/index.html; httpd -f -p 8080 -h /tmp/www"]
+    image: nginx
+    imagePullPolicy: IfNotPresent
+    command: ["sh", "-ec"]
+    args:
+    - |
+      mkdir -p /tmp/pmi-nginx
+      cat > /tmp/pmi-nginx/nginx.conf <<'NGINX'
+      worker_processes 1;
+      pid /tmp/pmi-nginx/nginx.pid;
+      error_log stderr notice;
+      events { worker_connections 64; }
+      http {
+        access_log off;
+        client_body_temp_path /tmp/pmi-nginx/client;
+        proxy_temp_path /tmp/pmi-nginx/proxy;
+        fastcgi_temp_path /tmp/pmi-nginx/fastcgi;
+        uwsgi_temp_path /tmp/pmi-nginx/uwsgi;
+        scgi_temp_path /tmp/pmi-nginx/scgi;
+        server {
+          listen 8080;
+          location / {
+            default_type text/plain;
+            return 200 "pmi-ok\n";
+          }
+        }
+      }
+      NGINX
+      exec nginx -e stderr -c /tmp/pmi-nginx/nginx.conf -g 'daemon off;'
     securityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -33,6 +59,9 @@ spec:
       httpGet:
         path: /
         port: 8080
+      periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 2
 ---
 apiVersion: v1
 kind: Pod
@@ -49,7 +78,8 @@ spec:
       type: RuntimeDefault
   containers:
   - name: app
-    image: busybox:1.36.1
+    image: redos_sudo
+    imagePullPolicy: IfNotPresent
     command: ["sh", "-c", "sleep 86400"]
     securityContext:
       allowPrivilegeEscalation: false

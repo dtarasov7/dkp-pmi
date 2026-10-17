@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Проверяем взаимное разделение арендаторов по API."
+echo "Шаг 1. Проверяем доступ каждого арендатора к своим и чужим данным."
 for TENANT in a b; do
   OTHER=a
   if [ "$TENANT" = a ]; then
@@ -22,9 +22,10 @@ done
 IP_A=$(kubectl -n pmi-64-a get pod server -o jsonpath='{.status.podIP}')
 IP_B=$(kubectl -n pmi-64-b get pod server -o jsonpath='{.status.podIP}')
 echo "Адреса серверов: A=$IP_A, B=$IP_B"
-echo "До изоляции проверяем доступность в обоих направлениях."
-kubectl -n pmi-64-a exec client -c app -- wget -T 3 -qO- "http://$IP_B:8080/"
-kubectl -n pmi-64-b exec client -c app -- wget -T 3 -qO- "http://$IP_A:8080/"
+echo "Шаг 2. До изоляции HTTP должен работать в обоих направлениях."
+kubectl -n pmi-64-a exec client -c app -- curl --noproxy '*' --fail --show-error --silent --connect-timeout 3 --max-time 3 "http://$IP_B:8080/"
+kubectl -n pmi-64-b exec client -c app -- curl --noproxy '*' --fail --show-error --silent --connect-timeout 3 --max-time 3 "http://$IP_A:8080/"
+echo "Шаг 3. Разрешаем каждому арендатору трафик только внутри своего namespace."
 for TENANT in a b; do
   kubectl create -f - <<YAML
 apiVersion: networking.k8s.io/v1
@@ -43,6 +44,7 @@ spec:
     - podSelector: {}
 YAML
 done
+echo "Шаг 4. Проверяем разрешённые и запрещённые HTTP-запросы."
 for TENANT in a b; do
   OWN_IP=$IP_A
   OTHER_IP=$IP_B
@@ -51,29 +53,26 @@ for TENANT in a b; do
     OTHER_IP=$IP_A
   fi
   echo "Внутри арендатора $TENANT запрос должен проходить."
-  kubectl -n "pmi-64-$TENANT" exec client -c app -- wget -T 3 -qO- "http://$OWN_IP:8080/"
-  BLOCKED=false
-  for ATTEMPT in {1..20}; do
-    if RESULT=$(kubectl -n "pmi-64-$TENANT" exec client -c app -- wget -T 3 -qO- "http://$OTHER_IP:8080/" 2>&1); then
-      echo "Попытка $ATTEMPT: ждём применения политики. Ответ: $RESULT"
-    else
-      echo "$RESULT"
-      if [[ "$RESULT" != *'wget:'* || "$RESULT" != *'timed out'* ]]; then
-        echo "ОШИБКА: получен другой отказ."
-        exit 1
-      fi
-      BLOCKED=true
+  kubectl -n "pmi-64-$TENANT" exec client -c app -- curl --noproxy '*' --fail --show-error --silent --connect-timeout 3 --max-time 3 "http://$OWN_IP:8080/"
+  for ATTEMPT in {1..10}; do
+    echo "Запрос к другому арендатору: попытка $ATTEMPT из 10."
+    # Сохраняем код команды: 0 — доступ есть, 28 — тайм-аут.
+    CURL_STATUS=0
+    kubectl -n "pmi-64-$TENANT" exec client -c app -- curl --noproxy '*' --fail --show-error --silent --max-time 3 "http://$OTHER_IP:8080/" || CURL_STATUS=$?
+    echo "Код запроса: $CURL_STATUS"
+    if [ "$CURL_STATUS" -ne 0 ]; then
       break
     fi
     sleep 2
   done
-  if [ "$BLOCKED" != true ]; then
-    echo "ОШИБКА: межарендный доступ не заблокирован."
+  if [ "$CURL_STATUS" -ne 28 ]; then
+    echo "ОШИБКА: ожидался тайм-аут 28. Другие ошибки не подтверждают изоляцию."
     exit 1
   fi
   echo "После подтверждения запрета повторяем разрешённый запрос внутри арендатора."
-  kubectl -n "pmi-64-$TENANT" exec client -c app -- wget -T 3 -qO- "http://$OWN_IP:8080/"
+  kubectl -n "pmi-64-$TENANT" exec client -c app -- curl --noproxy '*' --fail --show-error --silent --connect-timeout 3 --max-time 3 "http://$OWN_IP:8080/"
 done
-kubectl -n pmi-64-a exec server -c app -- wget -T 3 -qO- http://127.0.0.1:8080/
-kubectl -n pmi-64-b exec server -c app -- wget -T 3 -qO- http://127.0.0.1:8080/
+echo "Шаг 5. HTTP readinessProbe должна подтверждать готовность обоих серверов."
+kubectl -n pmi-64-a wait --for=condition=Ready pod/server --timeout=60s
+kubectl -n pmi-64-b wait --for=condition=Ready pod/server --timeout=60s
 echo "УСПЕХ: проверены RBAC и двусторонняя сетевая изоляция тестовых арендаторов. Границы проверки указаны в README."

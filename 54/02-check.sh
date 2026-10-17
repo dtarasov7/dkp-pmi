@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Проверяем матрицу из девяти запросов создания через серверный dry-run."
-for PROFILE in privileged baseline restricted; do
-  for VARIANT in privileged basic hardened; do
-    SECURITY='{}'
-    EXPECT_DENY=false
-    if [ "$VARIANT" = privileged ]; then
-      SECURITY='{privileged: true}'
-      if [ "$PROFILE" != privileged ]; then
-        EXPECT_DENY=true
-      fi
-    fi
-    if [ "$VARIANT" = basic ] && [ "$PROFILE" = restricted ]; then
-      EXPECT_DENY=true
-    fi
-    if [ "$VARIANT" = hardened ]; then
-      SECURITY='{runAsNonRoot: true, runAsUser: 1000, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}'
-    fi
-    echo "Профиль: $PROFILE; вариант Pod: $VARIANT; ожидается запрет: $EXPECT_DENY"
-    if RESULT=$(kubectl create --dry-run=server -f - 2>&1 <<YAML
+echo "Проверяем таблицу в конце скрипта: профиль, вариант Pod, ожидаемый allow/deny."
+while read -r PROFILE VARIANT EXPECTED; do
+  SECURITY='{}'
+  if [ "$VARIANT" = privileged ]; then
+    SECURITY='{privileged: true}'
+  fi
+  if [ "$VARIANT" = hardened ]; then
+    SECURITY='{runAsNonRoot: true, runAsUser: 1000, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}'
+  fi
+
+  echo "Профиль: $PROFILE; вариант Pod: $VARIANT; ожидаем: $EXPECTED."
+  # Сервер проверяет Pod, но не создаёт его и не запускает контейнер.
+  if RESULT=$(kubectl create --dry-run=server -f - 2>&1 <<YAML
 apiVersion: v1
 kind: Pod
 metadata:
@@ -28,27 +22,37 @@ metadata:
 spec:
   containers:
   - name: app
-    image: busybox:1.36.1
+    image: redos_sudo
+    imagePullPolicy: IfNotPresent
     command: ["sh", "-c", "sleep 3600"]
     securityContext: $SECURITY
 YAML
-    ); then
-      echo "$RESULT"
-      if [ "$EXPECT_DENY" = true ]; then
-        echo "ОШИБКА: небезопасный запрос разрешён. Проверьте режим deny и синхронизацию Gatekeeper."
-        exit 1
-      fi
-    else
-      echo "$RESULT"
-      if [ "$EXPECT_DENY" = false ]; then
-        echo "ОШИБКА: контрольный запрос отклонён."
-        exit 1
-      fi
-      if [[ "$RESULT" != *'gatekeeper'* || "$RESULT" != *'denied the request'* ]]; then
-        echo "ОШИБКА: запрет не подтверждён ответом Gatekeeper."
-        exit 1
-      fi
+  ); then
+    ACTUAL=allow
+  else
+    ACTUAL=deny
+  fi
+  echo "$RESULT"
+  echo "Результат: $ACTUAL"
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "ОШИБКА: результат отличается от таблицы."
+    exit 1
+  fi
+  if [ "$ACTUAL" = deny ]; then
+    if [[ "$RESULT" != *'validation.gatekeeper.sh" denied the request'* ]]; then
+      echo "ОШИБКА: запрос отклонён по другой причине, запрет Gatekeeper не подтверждён."
+      exit 1
     fi
-  done
-done
-echo "УСПЕХ: три уровня Gatekeeper различаются по ожидаемой матрице. Pod проверены без запуска."
+  fi
+done <<'TESTS'
+privileged privileged allow
+privileged basic      allow
+privileged hardened   allow
+baseline   privileged deny
+baseline   basic      allow
+baseline   hardened   allow
+restricted privileged deny
+restricted basic      deny
+restricted hardened   allow
+TESTS
+echo "УСПЕХ: три уровня Gatekeeper соответствуют таблице. Pod проверены без запуска."

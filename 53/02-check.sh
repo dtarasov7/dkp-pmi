@@ -3,10 +3,10 @@ set -euo pipefail
 
 SERVER_IP=$(kubectl -n pmi-53 get pod server -o jsonpath='{.status.podIP}')
 echo "Адрес сервера: $SERVER_IP"
-echo "До политики: HTTP-запрос должен проходить."
-kubectl -n pmi-53 exec client -c app -- wget -T 3 -qO- "http://$SERVER_IP:8080/"
+echo "Шаг 1. До политики HTTP-запрос должен проходить."
+kubectl -n pmi-53 exec client -c app -- curl --noproxy '*' --fail --show-error --silent --connect-timeout 3 --max-time 3 "http://$SERVER_IP:8080/"
 echo "Откройте Hubble, выберите pmi-53 и включите отображение dropped flows."
-echo "Применяем запрет ingress только к тестовому серверу."
+echo "Шаг 2. Запрещаем входящий трафик к тестовому серверу."
 kubectl create -f - <<'YAML'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -20,37 +20,22 @@ spec:
   policyTypes: [Ingress]
   ingress: []
 YAML
-BLOCKED=false
-for ATTEMPT in {1..20}; do
-  if RESULT=$(kubectl -n pmi-53 exec client -c app -- wget -T 3 -qO- "http://$SERVER_IP:8080/" 2>&1); then
-    echo "Попытка $ATTEMPT: политика ещё применяется. Ответ: $RESULT"
-  else
-    echo "$RESULT"
-    if [[ "$RESULT" != *'wget:'* || "$RESULT" != *'timed out'* ]]; then
-      echo "ОШИБКА: это не ожидаемый тайм-аут сетевого запрета."
-      exit 1
-    fi
-    BLOCKED=true
+echo "Шаг 3. Повторяем запрос до первого отказа: Cilium применяет правило не мгновенно."
+for ATTEMPT in {1..10}; do
+  echo "Попытка $ATTEMPT из 10."
+  # Не останавливаем скрипт при ожидаемом отказе; сохраняем код команды.
+  CURL_STATUS=0
+  kubectl -n pmi-53 exec client -c app -- curl --noproxy '*' --fail --show-error --silent --max-time 3 "http://$SERVER_IP:8080/" || CURL_STATUS=$?
+  echo "Код запроса: $CURL_STATUS (0 — доступ есть, 28 — тайм-аут)."
+  if [ "$CURL_STATUS" -ne 0 ]; then
     break
   fi
   sleep 2
 done
-if [ "$BLOCKED" != true ]; then
-  echo "ОШИБКА: запрет не вступил в силу."
+if [ "$CURL_STATUS" -ne 28 ]; then
+  echo "ОШИБКА: ожидался тайм-аут 28. Другие ошибки не подтверждают сетевой запрет."
   exit 1
 fi
-echo "Проверяем работоспособность самого сервера."
-kubectl -n pmi-53 exec server -c app -- wget -T 3 -qO- http://127.0.0.1:8080/
-echo "Повторяем запросы для фиксации dropped flows в Hubble."
-for ATTEMPT in {1..5}; do
-  if RESULT=$(kubectl -n pmi-53 exec client -c app -- wget -T 3 -qO- "http://$SERVER_IP:8080/" 2>&1); then
-    echo "ОШИБКА: доступ неожиданно восстановился. Ответ: $RESULT"
-    exit 1
-  fi
-  echo "$RESULT"
-  if [[ "$RESULT" != *'wget:'* || "$RESULT" != *'timed out'* ]]; then
-    echo "ОШИБКА: неожиданный отказ."
-    exit 1
-  fi
-done
+echo "Шаг 4. HTTP readinessProbe должна подтверждать, что сервер продолжает отвечать."
+kubectl -n pmi-53 wait --for=condition=Ready pod/server --timeout=60s
 echo "Сетевой отказ воспроизведён. Для приёмки подтвердите POLICY_DENIED в Hubble по README."

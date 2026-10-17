@@ -63,6 +63,18 @@
 Источники: [Istio в Deckhouse](https://deckhouse.io/modules/istio/),
 [индикаторы безопасности Kiali](https://kiali.io/docs/features/security/).
 
+
+## Тестовые образы
+
+HTTP-сервер — имеющийся `nginx`, клиент — `redos_sudo` с curl.
+Для обоих задано `imagePullPolicy: IfNotPresent`.
+Nginx слушает 8080, возвращает `pmi-ok` и запускается от UID 1000 с собственными
+конфигурацией, PID и временными файлами в `/tmp/pmi-nginx`.
+Утилиты curl/wget внутри nginx не требуются. HTTP readinessProbe проверяет ответ
+сервера.
+Запросы клиента используют curl с `--noproxy '*'`, чтобы обращаться прямо
+к проверяемому Pod/сервису.
+
 ## Запуск
 
 После задания внешних параметров, если они перечислены выше, из каталога `41`:

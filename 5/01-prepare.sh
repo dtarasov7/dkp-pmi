@@ -63,7 +63,8 @@ spec:
       type: RuntimeDefault
   containers:
   - name: app
-    image: busybox:1.36.1
+    image: redos_sudo
+    imagePullPolicy: IfNotPresent
     command: ["sh", "-c", "sleep 86400"]
     securityContext:
       allowPrivilegeEscalation: false

@@ -103,5 +103,53 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: pmi-36-editor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: observer
+  namespace: pmi-36
+rules:
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles"]
+  resourceNames: ["target"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: observer
+  namespace: pmi-36
+subjects:
+- kind: ServiceAccount
+  name: observer
+  namespace: pmi-36
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: observer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pmi-36-observer
+rules:
+- apiGroups: ["deckhouse.io"]
+  resources: ["securitypolicies"]
+  resourceNames: ["pmi-36"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pmi-36-observer
+subjects:
+- kind: ServiceAccount
+  name: observer
+  namespace: pmi-36
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pmi-36-observer
 YAML
-echo "Подготовка завершена. Политика СЗИ ограничена тестовым namespace."
+echo "Подготовка завершена. Чтение тестовых политик разрешено отдельно от их изменения."

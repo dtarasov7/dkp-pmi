@@ -26,7 +26,6 @@ done
 echo "Создаём изолированную политику RBAC и политику СЗИ для пункта 37."
 kubectl create namespace pmi-37
 kubectl label namespace pmi-37 pmi-test=37
-kubectl -n pmi-37 create serviceaccount observer
 kubectl -n pmi-37 create serviceaccount editor
 kubectl create -f - <<'YAML'
 apiVersion: rbac.authorization.k8s.io/v1
@@ -103,5 +102,53 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: pmi-37-editor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: reader
+  namespace: pmi-37
+rules:
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles"]
+  resourceNames: ["target"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: reader
+  namespace: pmi-37
+subjects:
+- kind: ServiceAccount
+  name: editor
+  namespace: pmi-37
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pmi-37-reader
+rules:
+- apiGroups: ["deckhouse.io"]
+  resources: ["securitypolicies"]
+  resourceNames: ["pmi-37"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pmi-37-reader
+subjects:
+- kind: ServiceAccount
+  name: editor
+  namespace: pmi-37
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pmi-37-reader
 YAML
-echo "Подготовка завершена. Политика СЗИ ограничена тестовым namespace."
+echo "Подготовка завершена. Чтение тестовых политик разрешено отдельно от их изменения."

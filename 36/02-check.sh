@@ -1,68 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Шаг 1. Проверяем запрет изменения Role учётной записью observer."
+echo "Шаг 1. Observer может читать обе политики, но не имеет права их изменять."
+kubectl --as=system:serviceaccount:pmi-36:observer -n pmi-36 get role target
+kubectl --as=system:serviceaccount:pmi-36:observer get securitypolicy pmi-36
 
-BEFORE=$(kubectl -n pmi-36 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение до запроса: $BEFORE"
-if [ "$BEFORE" != "get" ]; then
-  echo "ОШИБКА: требуется чистое исходное состояние."
-  exit 1
-fi
+echo "Шаг 2. Выполняем две попытки изменения от observer. Ожидаем отказ именно на PATCH."
 if RESULT=$(kubectl --as=system:serviceaccount:pmi-36:observer -n pmi-36 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list"]}]}' 2>&1); then
   echo "$RESULT"
-  echo "ОШИБКА: изменение без разрешения прошло."
+  echo "ОШИБКА: observer получил право изменять Role."
   exit 1
 fi
 echo "$RESULT"
-if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-36:observer" cannot patch resource'* ]]; then
-  echo "ОШИБКА: получен другой отказ."
-  exit 1
-fi
-AFTER=$(kubectl -n pmi-36 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение после отказа: $AFTER"
-if [ "$AFTER" != "$BEFORE" ]; then
-  echo "ОШИБКА: политика изменилась."
-  exit 1
-fi
-echo "Шаг 2. Разрешённое изменение Role учётной записью editor."
-kubectl --as=system:serviceaccount:pmi-36:editor -n pmi-36 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list"]}]}'
-AFTER=$(kubectl -n pmi-36 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение после разрешённого запроса: $AFTER"
-if [ "$AFTER" != "get list" ]; then
-  echo "ОШИБКА: разрешённое изменение не применено."
-  exit 1
-fi
-
-echo "Шаг 3. Проверяем запрет изменения SecurityPolicy учётной записью observer."
-BEFORE=$(kubectl get securitypolicy pmi-36 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение до запроса: $BEFORE"
-if [ "$BEFORE" != "false" ]; then
-  echo "ОШИБКА: требуется чистое исходное состояние."
+if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-36:observer" cannot patch resource "roles"'* ]]; then
+  echo "ОШИБКА: получен другой отказ; запрет PATCH не подтверждён."
   exit 1
 fi
 if RESULT=$(kubectl --as=system:serviceaccount:pmi-36:observer patch securitypolicy pmi-36 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":true}}}' 2>&1); then
   echo "$RESULT"
-  echo "ОШИБКА: изменение без разрешения прошло."
+  echo "ОШИБКА: observer получил право изменять SecurityPolicy."
   exit 1
 fi
 echo "$RESULT"
-if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-36:observer" cannot patch resource'* ]]; then
-  echo "ОШИБКА: получен другой отказ."
+if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-36:observer" cannot patch resource "securitypolicies"'* ]]; then
+  echo "ОШИБКА: получен другой отказ; запрет PATCH не подтверждён."
   exit 1
 fi
-AFTER=$(kubectl get securitypolicy pmi-36 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение после отказа: $AFTER"
-if [ "$AFTER" != "$BEFORE" ]; then
-  echo "ОШИБКА: политика изменилась."
-  exit 1
-fi
-echo "Шаг 4. Разрешённое изменение SecurityPolicy учётной записью editor."
+
+echo "Шаг 3. Editor выполняет те же изменения с разрешённой учётной записью."
+kubectl --as=system:serviceaccount:pmi-36:editor -n pmi-36 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list"]}]}'
 kubectl --as=system:serviceaccount:pmi-36:editor patch securitypolicy pmi-36 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":true}}}'
-AFTER=$(kubectl get securitypolicy pmi-36 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение после разрешённого запроса: $AFTER"
-if [ "$AFTER" != "true" ]; then
-  echo "ОШИБКА: разрешённое изменение не применено."
+
+echo "Шаг 4. Проверяем регистрацию инициатора и решения авторизации в локальном аудите."
+if [ -z "${AUDIT_FILE:-}" ]; then
+  AUDIT_FILE=/var/log/kube-audit/audit.log
+fi
+START_TIME=$(kubectl get namespace pmi-36 -o jsonpath='{.metadata.creationTimestamp}')
+if [ -z "$START_TIME" ]; then
+  echo "ОШИБКА: не найдено время создания тестового namespace."
   exit 1
 fi
-echo "УСПЕХ: авторизация блокирует запрещённые изменения и допускает разрешённые. Для аудита выполните шаги README."
+EVENTS=$(
+  if [ -r "$AUDIT_FILE" ]; then
+    cat "$AUDIT_FILE"
+  else
+    sudo cat "$AUDIT_FILE"
+  fi |
+  jq -c --arg start "$START_TIME" '
+    select(.kind == "Event" and .stage == "ResponseComplete")
+    | select(.verb == "patch")
+    | select(.requestReceivedTimestamp[0:19] >= $start[0:19])
+    | select((.objectRef.apiGroup == "rbac.authorization.k8s.io" and .objectRef.resource == "roles" and .objectRef.namespace == "pmi-36" and .objectRef.name == "target")
+          or (.objectRef.apiGroup == "deckhouse.io" and .objectRef.resource == "securitypolicies" and .objectRef.name == "pmi-36"))
+  ' | jq -s '.'
+)
+echo "$EVENTS" | jq '.[] | {auditID,requestReceivedTimestamp,user,impersonatedUser,verb,objectRef,responseStatus,annotations}'
+
+# Для каждого вида политики нужны две записи: отказ observer и разрешение editor.
+while read -r RESOURCE ACCOUNT CODE DECISION; do
+  COUNT=$(echo "$EVENTS" | jq --arg resource "$RESOURCE" --arg account "system:serviceaccount:pmi-36:$ACCOUNT" --argjson code "$CODE" --arg decision "$DECISION" '
+    [.[]
+     | select(.objectRef.resource == $resource)
+     | select((.impersonatedUser.username // .user.username) == $account)
+     | select(.responseStatus.code == $code)
+     | select(.annotations["authorization.k8s.io/decision"] == $decision)] | length
+  ')
+  echo "$RESOURCE: $ACCOUNT, код $CODE, решение $DECISION — найдено записей: $COUNT"
+  if [ "$COUNT" -eq 0 ]; then
+    echo "ОШИБКА: нужная запись контроля отсутствует. Проверьте политику аудита и запись журнала."
+    exit 1
+  fi
+done <<'EXPECTED'
+roles            observer 403 forbid
+roles            editor   200 allow
+securitypolicies observer 403 forbid
+securitypolicies editor   200 allow
+EXPECTED
+echo "УСПЕХ: контроль изменений обеих политик фиксирует инициатора, отказ и разрешение в аудите."

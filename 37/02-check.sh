@@ -1,68 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Шаг 1. Проверяем запрет изменения Role учётной записью observer."
-
-BEFORE=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение до запроса: $BEFORE"
-if [ "$BEFORE" != "get" ]; then
-  echo "ОШИБКА: требуется чистое исходное состояние."
-  exit 1
-fi
-if RESULT=$(kubectl --as=system:serviceaccount:pmi-37:observer -n pmi-37 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list"]}]}' 2>&1); then
-  echo "$RESULT"
-  echo "ОШИБКА: изменение без разрешения прошло."
-  exit 1
-fi
-echo "$RESULT"
-if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-37:observer" cannot patch resource'* ]]; then
-  echo "ОШИБКА: получен другой отказ."
-  exit 1
-fi
-AFTER=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение после отказа: $AFTER"
-if [ "$AFTER" != "$BEFORE" ]; then
-  echo "ОШИБКА: политика изменилась."
-  exit 1
-fi
-echo "Шаг 2. Разрешённое изменение Role учётной записью editor."
+echo "Шаг 1. Пока editor имеет право изменения, PATCH обеих политик проходит."
 kubectl --as=system:serviceaccount:pmi-37:editor -n pmi-37 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get","list"]}]}'
-AFTER=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
-echo "Значение после разрешённого запроса: $AFTER"
-if [ "$AFTER" != "get list" ]; then
-  echo "ОШИБКА: разрешённое изменение не применено."
+kubectl --as=system:serviceaccount:pmi-37:editor patch securitypolicy pmi-37 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":true}}}'
+ROLE_BEFORE=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
+POLICY_BEFORE=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
+echo "После разрешённых изменений: Role=$ROLE_BEFORE; allowHostNetwork=$POLICY_BEFORE"
+if [ "$ROLE_BEFORE" != 'get list' ] || [ "$POLICY_BEFORE" != true ]; then
+  echo "ОШИБКА: исходные разрешённые изменения не применились."
   exit 1
 fi
 
-echo "Шаг 3. Проверяем запрет изменения SecurityPolicy учётной записью observer."
-BEFORE=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение до запроса: $BEFORE"
-if [ "$BEFORE" != "false" ]; then
-  echo "ОШИБКА: требуется чистое исходное состояние."
-  exit 1
-fi
-if RESULT=$(kubectl --as=system:serviceaccount:pmi-37:observer patch securitypolicy pmi-37 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":true}}}' 2>&1); then
+echo "Шаг 2. Отзываем у editor разрешение на изменение. Отдельные права чтения сохраняются."
+kubectl -n pmi-37 delete rolebinding editor
+kubectl delete clusterrolebinding pmi-37-editor
+kubectl --as=system:serviceaccount:pmi-37:editor -n pmi-37 get role target
+kubectl --as=system:serviceaccount:pmi-37:editor get securitypolicy pmi-37
+
+echo "Шаг 3. Та же учётная запись пытается вернуть Role к исходному значению."
+if RESULT=$(kubectl --as=system:serviceaccount:pmi-37:editor -n pmi-37 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get"]}]}' 2>&1); then
   echo "$RESULT"
-  echo "ОШИБКА: изменение без разрешения прошло."
+  echo "ОШИБКА: изменение Role прошло после отзыва разрешения."
   exit 1
 fi
 echo "$RESULT"
-if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-37:observer" cannot patch resource'* ]]; then
-  echo "ОШИБКА: получен другой отказ."
+if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-37:editor" cannot patch resource "roles"'* ]]; then
+  echo "ОШИБКА: ожидался запрет PATCH, а не ошибка GET или другая причина."
   exit 1
 fi
-AFTER=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение после отказа: $AFTER"
-if [ "$AFTER" != "$BEFORE" ]; then
-  echo "ОШИБКА: политика изменилась."
+ROLE_AFTER=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
+echo "Role до запрещённого PATCH: $ROLE_BEFORE; после: $ROLE_AFTER"
+if [ "$ROLE_AFTER" != "$ROLE_BEFORE" ]; then
+  echo "ОШИБКА: заблокированное изменение затронуло Role."
   exit 1
 fi
-echo "Шаг 4. Разрешённое изменение SecurityPolicy учётной записью editor."
-kubectl --as=system:serviceaccount:pmi-37:editor patch securitypolicy pmi-37 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":true}}}'
-AFTER=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
-echo "Значение после разрешённого запроса: $AFTER"
-if [ "$AFTER" != "true" ]; then
-  echo "ОШИБКА: разрешённое изменение не применено."
+
+echo "Шаг 4. Проверяем блокировку возврата allowHostNetwork в SecurityPolicy."
+if RESULT=$(kubectl --as=system:serviceaccount:pmi-37:editor patch securitypolicy pmi-37 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":false}}}' 2>&1); then
+  echo "$RESULT"
+  echo "ОШИБКА: изменение SecurityPolicy прошло после отзыва разрешения."
   exit 1
 fi
-echo "УСПЕХ: авторизация блокирует запрещённые изменения и допускает разрешённые. Для аудита выполните шаги README."
+echo "$RESULT"
+if [[ "$RESULT" != *'is forbidden: User "system:serviceaccount:pmi-37:editor" cannot patch resource "securitypolicies"'* ]]; then
+  echo "ОШИБКА: ожидался запрет PATCH, а не ошибка GET или другая причина."
+  exit 1
+fi
+POLICY_AFTER=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
+echo "allowHostNetwork до запрещённого PATCH: $POLICY_BEFORE; после: $POLICY_AFTER"
+if [ "$POLICY_AFTER" != "$POLICY_BEFORE" ]; then
+  echo "ОШИБКА: заблокированное изменение затронуло SecurityPolicy."
+  exit 1
+fi
+
+echo "Шаг 5. Администратор возвращает исходные значения: API и сами объекты исправны."
+kubectl -n pmi-37 patch role target --type=merge -p '{"rules":[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get"]}]}'
+kubectl patch securitypolicy pmi-37 --type=merge -p '{"spec":{"policies":{"allowHostNetwork":false}}}'
+ROLE_AFTER=$(kubectl -n pmi-37 get role target -o jsonpath='{.rules[0].verbs[*]}')
+POLICY_AFTER=$(kubectl get securitypolicy pmi-37 -o jsonpath='{.spec.policies.allowHostNetwork}')
+echo "После разрешённого восстановления: Role=$ROLE_AFTER; allowHostNetwork=$POLICY_AFTER"
+if [ "$ROLE_AFTER" != get ] || [ "$POLICY_AFTER" != false ]; then
+  echo "ОШИБКА: разрешённое восстановление политик не выполнено."
+  exit 1
+fi
+echo "УСПЕХ: после отзыва разрешения изменения обеих политик заблокированы; чтение и разрешённые изменения работают."

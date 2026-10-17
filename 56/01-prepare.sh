@@ -20,7 +20,7 @@ for API_POD in $API_PODS; do
     exit 1
   fi
 done
-echo "Аудит настроен в аргументах запуска. Полнота записей будет проверена по выгрузке."
+echo "Аудит настроен в аргументах запуска. Полнота записей будет проверена в локальном журнале."
 
 echo "Создаём маркер и выполняем операции для аудита пункта 56."
 kubectl create namespace pmi-56
@@ -40,4 +40,4 @@ if [[ "$RESULT" != *'forbidden'* || "$RESULT" != *'cannot get resource "configma
   exit 1
 fi
 kubectl -n pmi-56 delete configmap audit-marker
-echo "События сформированы. Выгрузите аудит всех API-серверов за время этого запуска по README."
+echo "События сформированы. Запустите 02-check.sh: он сам прочитает /var/log/kube-audit/audit.log."
